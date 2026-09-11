@@ -14,9 +14,11 @@
 #include <filesystem>
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
+#include "pgos/pose_export_format.h"
 #include "interface/srv/save_maps.hpp"
 #include <pcl/io/io.h>
 #include <fstream>
+#include <cmath>
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -34,6 +36,8 @@ struct NodeState
     std::mutex message_mutex;
     std::queue<CloudWithPose> cloud_buffer;
     double last_message_time;
+    std::string cloud_frame, odom_parent_frame, odom_child_frame;
+    bool frame_mismatch = false;
 };
 
 class PGONode : public rclcpp::Node
@@ -85,7 +89,15 @@ public:
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
 
-        std::lock_guard<std::mutex>(m_state.message_mutex);
+        std::lock_guard<std::mutex> lock(m_state.message_mutex);
+        if (m_state.cloud_frame.empty()) {
+            m_state.cloud_frame = cloud_msg->header.frame_id;
+            m_state.odom_parent_frame = odom_msg->header.frame_id;
+            m_state.odom_child_frame = odom_msg->child_frame_id;
+        } else if (m_state.cloud_frame != cloud_msg->header.frame_id || m_state.odom_parent_frame != odom_msg->header.frame_id || m_state.odom_child_frame != odom_msg->child_frame_id) {
+            m_state.frame_mismatch = true;
+            RCLCPP_ERROR(this->get_logger(), "PGO input frame mismatch");
+        }
         CloudWithPose cp;
         cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
         if (cp.pose.second < m_state.last_message_time)
@@ -239,6 +251,8 @@ public:
         std::filesystem::path p_dir(request->file_path);
         std::filesystem::path patches_dir = p_dir / "patches";
         std::filesystem::path poses_txt_path = p_dir / "poses.txt";
+        std::filesystem::path poses_timed_path = p_dir / "poses_timed.txt";
+        std::filesystem::path metadata_path = p_dir / "metadata.yaml";
         std::filesystem::path map_path = p_dir / "map.pcd";
 
         if (request->save_patches)
@@ -258,7 +272,10 @@ public:
         }
         RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
 
+        if (m_state.frame_mismatch) { response->success = false; response->message = "INPUT_FRAME_MISMATCH"; return; }
         std::ofstream txt_file(poses_txt_path);
+        std::ofstream timed_file(poses_timed_path);
+        if (!txt_file || !timed_file) { response->success = false; response->message = "EXPORT_OPEN_FAILED"; return; }
 
         CloudType::Ptr ret(new CloudType);
         for (size_t i = 0; i < m_pgo->keyPoses().size(); i++)
@@ -272,14 +289,39 @@ public:
                 pcl::io::savePCDFileBinary(patch_path.string(), *body_cloud);
                 Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
                 V3D t = m_pgo->keyPoses()[i].t_global;
-                txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << std::endl;
+                const double stamp = m_pgo->keyPoses()[i].time;
+                if (!std::isfinite(stamp) || !t.allFinite() || !std::isfinite(q.norm()) || q.norm() < 1e-9 || std::abs(q.norm() - 1.0) > 1e-3) { response->success = false; response->message = "INVALID_POSE"; return; }
+                txt_file << formatLegacyPoseLine(patch_name, t, q);
+                timed_file << formatTimedPoseLine(patch_name, stamp, t, q);
             }
             CloudType::Ptr world_cloud(new CloudType);
             pcl::transformPointCloud(*body_cloud, *world_cloud, m_pgo->keyPoses()[i].t_global, Eigen::Quaterniond(m_pgo->keyPoses()[i].r_global));
             *ret += *world_cloud;
         }
         txt_file.close();
+        timed_file.close();
         pcl::io::savePCDFileBinary(map_path.string(), *ret);
+        YAML::Node meta;
+        meta["format_version"] = 1;
+        meta["cloud"]["frame_semantics"] = "body";
+        meta["cloud"]["source_topic"] = m_node_config.cloud_topic;
+        meta["pose"]["semantics"] = "T_map_body";
+        meta["pose"]["quaternion_order"] = "wxyz";
+        meta["pose"]["timestamp_unit"] = "seconds";
+        meta["pose"]["timestamp_source"] = "keyframe_cloud_timestamp";
+        meta["frames"]["map_frame"] = m_node_config.map_frame;
+        meta["frames"]["local_lio_frame"] = m_node_config.local_frame;
+        meta["frames"]["cloud_frame"] = m_state.cloud_frame;
+        meta["frames"]["odom_parent_frame"] = m_state.odom_parent_frame;
+        meta["frames"]["odom_child_frame"] = m_state.odom_child_frame;
+        meta["pgo"]["cloud_topic"] = m_node_config.cloud_topic;
+        meta["pgo"]["odom_topic"] = m_node_config.odom_topic;
+        meta["outputs"]["patches_dir"] = "patches";
+        meta["outputs"]["poses"] = "poses.txt";
+        meta["outputs"]["poses_timed"] = "poses_timed.txt";
+        meta["outputs"]["map"] = "map.pcd";
+        YAML::Emitter emitter; emitter << meta;
+        std::ofstream(metadata_path) << emitter.c_str();
         response->success = true;
         response->message = "SAVE SUCCESS!";
     }
