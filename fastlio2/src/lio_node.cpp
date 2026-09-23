@@ -50,8 +50,16 @@ public:
         RCLCPP_INFO(this->get_logger(), "LIO Node Started");
         loadParameters();
 
-        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(m_node_config.imu_topic, 10, std::bind(&LIONode::imuCB, this, std::placeholders::_1));
-        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(m_node_config.lidar_topic, 10, std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
+        // Navigation must prefer a recent scan over replaying a long DDS backlog.
+        // A MID360 scan arrives at about 10 Hz, so depth 1 bounds recovery after
+        // scheduler jitter.  IMU arrives near 200 Hz and needs a deeper queue to
+        // preserve all samples across the same interruption.
+        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(
+            m_node_config.imu_topic, 400,
+            std::bind(&LIONode::imuCB, this, std::placeholders::_1));
+        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+            m_node_config.lidar_topic, 1,
+            std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
 
         m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("body_cloud", 10000);
         m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("world_cloud", 10000);
