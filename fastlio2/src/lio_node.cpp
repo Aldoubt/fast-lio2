@@ -48,6 +48,8 @@ public:
     LIONode() : Node("lio_node")
     {
         RCLCPP_INFO(this->get_logger(), "LIO Node Started");
+        RCLCPP_INFO(this->get_logger(),
+            "Measurement model: imu-point-jacobian-v1 (R_il * p_l + t_il)");
         loadParameters();
 
         m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(m_node_config.imu_topic, 10, std::bind(&LIONode::imuCB, this, std::placeholders::_1));
