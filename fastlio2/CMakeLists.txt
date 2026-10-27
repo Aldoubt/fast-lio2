@@ -67,6 +67,11 @@ install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 
 if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_point_plane_jacobian test/test_point_plane_jacobian.cpp)
+  target_include_directories(test_point_plane_jacobian PRIVATE src/map_builder)
+  target_link_libraries(test_point_plane_jacobian Sophus::Sophus)
+  add_test(NAME point_plane_rotation_jacobian COMMAND test_point_plane_jacobian)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
